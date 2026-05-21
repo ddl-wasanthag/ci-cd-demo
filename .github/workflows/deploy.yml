@@ -1,0 +1,58 @@
+name: Deploy to Domino
+
+# Triggers on every push to main.
+# Re-running is always safe — the deploy script is fully idempotent.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to Domino
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Check out the repo ──────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ──────────────────────────────────────────────────
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # ── 3. Install the Domino deploy script's dependencies ────────────────
+      - name: Install deploy dependencies
+        run: pip install requests
+
+      # ── 4. Run the idempotent deploy script ───────────────────────────────
+      #
+      # Environment variables:
+      #   DOMINO_URL           – your Domino instance URL                  (secret)
+      #   DOMINO_SA_TOKEN      – service account Bearer token              (secret)
+      #   DOMINO_PROJECT_NAME  – name of the Domino project to create/use  (var or secret)
+      #   DOMINO_ENV_NAME      – name of the shared environment            (var or secret)
+      #   DOMINO_APP_NAME      – name of the Domino app                    (var or secret)
+      #   DOMINO_PROJECT_OWNER – Domino username who owns the project       (var, optional)
+      #                          If omitted, the project is created under the SA's account.
+      #                          Set this to a human username so the project appears in
+      #                          their workspace (e.g. "wasantha.gamage@dominodatalab.com").
+      #   GITHUB_REPO_URL      – built from github context — no secret needed
+      #
+      # NOTE: DOMINO_SA_TOKEN must be a service account Bearer token, NOT a
+      # personal API key. An admin must create the service account first.
+      # See the README for details.
+      #
+      - name: Deploy to Domino
+        env:
+          DOMINO_URL:           ${{ secrets.DOMINO_URL }}
+          DOMINO_SA_TOKEN:      ${{ secrets.DOMINO_SA_TOKEN }}
+          DOMINO_ADMIN_TOKEN:   ${{ secrets.DOMINO_ADMIN_TOKEN }}
+          DOMINO_PROJECT_NAME:  ${{ vars.DOMINO_PROJECT_NAME || github.event.repository.name }}
+          DOMINO_ENV_NAME:      ${{ vars.DOMINO_ENV_NAME || format('{0}-env', github.event.repository.name) }}
+          DOMINO_APP_NAME:      ${{ vars.DOMINO_APP_NAME || github.event.repository.name }}
+          DOMINO_PROJECT_OWNER: ${{ vars.DOMINO_PROJECT_OWNER }}
+          GITHUB_REPO_URL:      ${{ github.server_url }}/${{ github.repository }}.git
+        run: python deploy/deploy.py

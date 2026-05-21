@@ -1,0 +1,4 @@
+# App dependencies
+# These are installed at runtime by app.sh IF needed outside the environment.
+# The shared Domino environment already includes streamlit via Dockerfile instructions.
+streamlit>=1.35.0
