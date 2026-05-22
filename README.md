@@ -40,14 +40,33 @@ Each step checks whether the resource already exists before acting, so the pipel
 
 ### 1. Domino service account
 
-An admin must create the service account before the pipeline can run:
+Domino Service Accounts (DSAs) have no UI — they must be created via the API by a Domino administrator. See the [official docs](https://docs.dominodatalab.com/en/6.1/admin_guide/6921e5/manage-domino-service-accounts/) for full details. The steps are:
 
-1. In Domino, go to **Admin → Service Accounts → Create Service Account**
-2. Name it `functional-sa` (or set `DOMINO_SA_USERNAME` to a different name)
-3. Assign it the **Practitioner** role
-4. Generate a **Bearer token** — this is `DOMINO_SA_TOKEN`
+**Step 1 — Create the service account** (admin only):
 
-> The SA token is a JWT that expires (typically after 30 days). Rotate it in GitHub Secrets before expiry.
+```bash
+curl -X POST https://<domino-url>/v4/serviceAccounts \
+  -H "X-Domino-Api-Key: <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"userName": "functional-sa", "email": "functional-sa@your-org.com"}'
+```
+
+The response includes an `idpId` — save it, you need it for the next step.
+
+**Step 2 — Assign the Practitioner role** via **Admin Panel → User Management → functional-sa → Roles**.
+
+**Step 3 — Generate a Bearer token** (admin only):
+
+```bash
+curl -X POST https://<domino-url>/v4/serviceAccounts/<idpId>/tokens \
+  -H "X-Domino-Api-Key: <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "github-actions-token"}'
+```
+
+The `token` field in the response is `DOMINO_SA_TOKEN`.
+
+> SA tokens expire after **4 months** by default. Rotate before expiry — see [Token rotation](#token-rotation) below.
 
 ### 2. User API key (first run only)
 
@@ -142,9 +161,24 @@ Domino apps must listen on **port 8888**. The `app.sh` launcher passes `--server
 
 ## Token rotation
 
-SA tokens are JWTs with an expiry (check the `exp` claim). To rotate:
+SA tokens expire after 4 months by default. To rotate:
 
-1. In Domino: **Admin → Service Accounts → functional-sa → Generate New Token**
-2. In GitHub: **Settings → Secrets → DOMINO_SA_TOKEN → Update**
+**Step 1 — Generate a new token** (admin, via API):
+
+```bash
+curl -X POST https://<domino-url>/v4/serviceAccounts/<idpId>/tokens \
+  -H "X-Domino-Api-Key: <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "github-actions-token-2"}'
+```
+
+**Step 2 — Update the GitHub secret**: **Settings → Secrets → DOMINO_SA_TOKEN → Update** with the new token value.
+
+**Step 3 — Revoke the old token** once the new one is confirmed working:
+
+```bash
+curl -X POST https://<domino-url>/v4/serviceAccounts/<idpId>/tokens/<old-token-name>/invalidate \
+  -H "X-Domino-Api-Key: <admin-api-key>"
+```
 
 The pipeline will pick up the new token on the next push.
