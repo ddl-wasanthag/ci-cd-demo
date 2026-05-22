@@ -14,25 +14,29 @@ Idempotency guarantee:
   every git push is safe — no duplicate projects, environments, or apps.
 
 Two-token design:
-  DOMINO_SA_TOKEN   – Service account Bearer token. Used for all steps including
-                      project and app management. The SA must be a Practitioner.
-  DOMINO_ADMIN_TOKEN – (Optional) Admin API key or Bearer token. Only needed for
-                      environment creation, which requires EditEnvironment permission.
-                      If omitted and the environment doesn't already exist, the script
-                      exits with a helpful error. If the environment already exists,
-                      this token is never needed.
+  DOMINO_SA_TOKEN      – Service account Bearer token (JWT). Used for all steps
+                         including project and app management. The SA must be a
+                         Practitioner.
+  DOMINO_USER_API_KEY  – (Optional) A Domino user's API key (X-Domino-Api-Key).
+                         Needed on the first run for operations the SA cannot perform:
+                           • Creating a project owned by another user
+                           • Creating a compute environment (requires EditEnvironment)
+                         Any user whose API key has the required permissions can be used
+                         — this does not have to be an admin.
+                         If omitted and those resources already exist, this key is never
+                         needed again.
 
   Typical first-time setup:  provide both tokens → creates project + env + app.
   Subsequent pushes:          only DOMINO_SA_TOKEN needed → finds env, restarts app.
 
 Usage:
-  python deploy/deploy.py \
-      --domino-url    https://your-org.cs.domino.tech \
-      --sa-token      <service-account-bearer-token> \
-      --admin-token   <admin-api-key>                    # only needed first time \
-      --repo-url      https://github.com/your-org/your-repo.git \
-      --project-name  my-project \
-      --env-name      my-streamlit-env \
+  python deploy/deploy.py \\
+      --domino-url    https://your-org.cs.domino.tech \\
+      --sa-token      <service-account-bearer-token> \\
+      --user-api-key  <user-api-key>                    # only needed first time \\
+      --repo-url      https://github.com/your-org/your-repo.git \\
+      --project-name  my-project \\
+      --env-name      my-streamlit-env \\
       --app-name      my-app
 
 All values can also be supplied via environment variables (see argparse defaults).
@@ -59,7 +63,7 @@ from datetime import datetime, timezone
 class DominoClient:
     def __init__(self, base_url: str, token: str, use_api_key: bool = False):
         """
-        use_api_key=True  → X-Domino-Api-Key header (legacy API keys)
+        use_api_key=True  → X-Domino-Api-Key header (user API keys)
         use_api_key=False → Authorization: Bearer (service account JWT tokens)
         """
         self.base = base_url.rstrip("/")
@@ -103,7 +107,6 @@ def resolve_owner(client: DominoClient, owner_username: str) -> tuple[str, str]:
     """
     Resolve a username to (username, user_id).
 
-    If owner_username is provided, look it up via the API.
     Used to support creating the project under a human user's account rather than
     the service account's account.
     """
@@ -118,19 +121,19 @@ def resolve_owner(client: DominoClient, owner_username: str) -> tuple[str, str]:
 
 def ensure_project(client: DominoClient, project_name: str, repo_url: str,
                    owner_username: str, owner_id: str,
-                   admin_client: "DominoClient | None" = None) -> str:
+                   api_client: "DominoClient | None" = None) -> str:
     """
     Return the project ID, creating the git-backed project if needed.
 
-    admin_client: used as a fallback for lookup (SA can't see other users' private
-                  projects before it's a collaborator) and for creation
-                  (CreateProjectForOtherUsers permission required).
-                  On subsequent runs the SA is already a collaborator, so the lookup
-                  succeeds with the SA token and admin_client is never needed.
+    api_client: used as a fallback for lookup (SA can't see other users' private
+                projects before it's a collaborator) and for creation
+                (CreateProjectForOtherUsers permission required).
+                On subsequent runs the SA is already a collaborator, so the lookup
+                succeeds with the SA token and api_client is never needed.
     """
     print(f"\n[1] ensure_project: '{project_name}' (owner: {owner_username})")
 
-    # Try the SA token first (works on all subsequent runs); fall back to admin on
+    # Try the SA token first (works on all subsequent runs); fall back to user API key on
     # first run before the SA has been added as a collaborator.
     resp = client.get("/v4/projects", params={"name": project_name,
                                                "ownerUsername": owner_username})
@@ -138,10 +141,10 @@ def ensure_project(client: DominoClient, project_name: str, repo_url: str,
     matches = [p for p in resp.json()
                if p["name"] == project_name and p["ownerUsername"] == owner_username]
 
-    if not matches and admin_client:
-        resp = admin_client.get("/v4/projects", params={"name": project_name,
-                                                         "ownerUsername": owner_username})
-        admin_client.raise_for(resp, "GET /v4/projects (admin)")
+    if not matches and api_client:
+        resp = api_client.get("/v4/projects", params={"name": project_name,
+                                                       "ownerUsername": owner_username})
+        api_client.raise_for(resp, "GET /v4/projects (user api key)")
         matches = [p for p in resp.json()
                    if p["name"] == project_name and p["ownerUsername"] == owner_username]
 
@@ -150,10 +153,7 @@ def ensure_project(client: DominoClient, project_name: str, repo_url: str,
         print(f"  ✓  Found existing project — id={project_id}")
         return project_id
 
-    poster = admin_client or client
-    if owner_id != client.session.headers.get("sub") and not admin_client:
-        # Creating for another user requires admin — give a helpful error
-        pass  # let the POST fail naturally with a clear 403 message
+    poster = api_client or client
     print(f"  →  Project not found, creating with git backing: {repo_url}")
     body = {
         "name": project_name,
@@ -220,14 +220,15 @@ def add_service_account(client: DominoClient, project_id: str, sa_username: str,
 # ---------------------------------------------------------------------------
 
 def ensure_environment(client: DominoClient, env_name: str,
-                       admin_client: "DominoClient | None") -> str:
+                       api_client: "DominoClient | None") -> str:
     """
     Return the ID of the Global environment named `env_name`.
 
-    If not found and admin_client is provided, create it.
-    If not found and no admin_client, exit with a helpful error.
+    If not found and api_client is provided, create it.
+    If not found and no api_client, exit with a helpful error.
 
-    Creating environments requires EditEnvironment permission (typically admin).
+    Creating environments requires EditEnvironment permission. Provide a
+    DOMINO_USER_API_KEY from a user who has that permission on first run.
     On subsequent runs the environment already exists so only the SA token is needed.
     """
     print(f"\n[3] ensure_environment: '{env_name}'")
@@ -243,12 +244,12 @@ def ensure_environment(client: DominoClient, env_name: str,
         print(f"  ✓  Found existing environment '{env_name}' — id={env_id}")
         return env_id
 
-    if not admin_client:
+    if not api_client:
         print(
-            f"  ✗  Environment '{env_name}' not found and DOMINO_ADMIN_TOKEN is not set.\n"
+            f"  ✗  Environment '{env_name}' not found and DOMINO_USER_API_KEY is not set.\n"
             "     Options:\n"
             "     a) Create the environment manually in Domino with this exact name.\n"
-            "     b) Provide DOMINO_ADMIN_TOKEN on the first run so this script can\n"
+            "     b) Provide DOMINO_USER_API_KEY on the first run so this script can\n"
             "        create it automatically (requires EditEnvironment permission).",
             file=sys.stderr
         )
@@ -256,11 +257,11 @@ def ensure_environment(client: DominoClient, env_name: str,
 
     # Resolve base environment revision ID (Domino Standard Env Py3.10 R4.5)
     BASE_ENV_ID = "686fd386d3759f30baf334bb"
-    resp_base = admin_client.get(f"/v4/environments/{BASE_ENV_ID}")
-    admin_client.raise_for(resp_base, f"GET /v4/environments/{BASE_ENV_ID}")
+    resp_base = api_client.get(f"/v4/environments/{BASE_ENV_ID}")
+    api_client.raise_for(resp_base, f"GET /v4/environments/{BASE_ENV_ID}")
     base_rev_id = resp_base.json()["latestRevision"]["id"]
 
-    print(f"  →  Environment not found — creating '{env_name}' (requires admin token)")
+    print(f"  →  Environment not found — creating '{env_name}'")
     body = {
         "name": env_name,
         "description": "Shared Streamlit environment — auto-created by deploy.py",
@@ -273,8 +274,8 @@ def ensure_environment(client: DominoClient, env_name: str,
             "environmentRevisionId": base_rev_id,
         },
     }
-    resp = admin_client.post("/v1/environments", json=body)
-    admin_client.raise_for(resp, "POST /v1/environments")
+    resp = api_client.post("/v1/environments", json=body)
+    api_client.raise_for(resp, "POST /v1/environments")
     result = resp.json()
     # The v1 create API returns _id (not id) for the environment
     env_id = result.get("_id") or result.get("id")
@@ -353,17 +354,19 @@ def parse_args():
     parser.add_argument("--domino-url",    default=os.getenv("DOMINO_URL"))
     parser.add_argument("--sa-token",      default=os.getenv("DOMINO_SA_TOKEN"),
                         help="Service account Bearer token (env: DOMINO_SA_TOKEN)")
-    parser.add_argument("--admin-token",   default=os.getenv("DOMINO_ADMIN_TOKEN"),
-                        help="Admin API key for env creation, optional after first run "
-                             "(env: DOMINO_ADMIN_TOKEN)")
+    parser.add_argument("--user-api-key",  default=os.getenv("DOMINO_USER_API_KEY"),
+                        help="Domino user API key for first-time resource creation. "
+                             "Required on first run if DOMINO_PROJECT_OWNER is set or "
+                             "the environment doesn't exist yet. Not needed on subsequent "
+                             "pushes. (env: DOMINO_USER_API_KEY)")
     parser.add_argument("--repo-url",      default=os.getenv("GITHUB_REPO_URL"))
     parser.add_argument("--project-name",  default=os.getenv("DOMINO_PROJECT_NAME"))
     parser.add_argument("--env-name",      default=os.getenv("DOMINO_ENV_NAME"))
     parser.add_argument("--app-name",      default=os.getenv("DOMINO_APP_NAME"))
     parser.add_argument("--hw-tier",       default=os.getenv("DOMINO_HW_TIER", "small-k8s"))
-    parser.add_argument("--sa-username",     default=os.getenv("DOMINO_SA_USERNAME",
-                                                                "functional-sa"))
-    parser.add_argument("--project-owner",  default=os.getenv("DOMINO_PROJECT_OWNER"),
+    parser.add_argument("--sa-username",   default=os.getenv("DOMINO_SA_USERNAME",
+                                                              "functional-sa"))
+    parser.add_argument("--project-owner", default=os.getenv("DOMINO_PROJECT_OWNER"),
                         help="Domino username who should own the project. "
                              "Defaults to the service account itself. Set this to a human "
                              "user's username so the project appears in their workspace. "
@@ -389,9 +392,9 @@ def main():
     # SA client (Bearer JWT token)
     sa = DominoClient(args.domino_url, args.sa_token, use_api_key=False)
 
-    # Admin client (API key) — optional, only needed for first-time env creation
-    admin = (DominoClient(args.domino_url, args.admin_token, use_api_key=True)
-             if args.admin_token else None)
+    # User API key client — optional, only needed for first-time resource creation
+    api = (DominoClient(args.domino_url, args.user_api_key, use_api_key=True)
+           if args.user_api_key else None)
 
     me = sa.get_self()
     sa_username = me["userName"]
@@ -411,18 +414,18 @@ def main():
     print(f"  Project          : {args.project_name}")
     print(f"  Environment      : {args.env_name}")
     print(f"  App              : {args.app_name}")
-    print(f"  Admin token      : {'provided' if admin else 'not provided (env must already exist)'}")
+    print(f"  User API key     : {'provided' if api else 'not provided (resources must already exist)'}")
 
     # When creating a project for another user, the SA can't see their private projects
-    # and lacks CreateProjectForOtherUsers permission — use admin for all project ops.
+    # and lacks CreateProjectForOtherUsers permission — use the user API key for those ops.
     project_id = ensure_project(sa, args.project_name, args.repo_url,
                                  owner_username, owner_id,
-                                 admin_client=(admin if args.project_owner else None))
+                                 api_client=(api if args.project_owner else None))
     # When the project is owned by another user, the SA has no access yet —
-    # use admin to manage collaborators until the SA has been added.
-    manage_client = admin if args.project_owner else None
+    # use the user API key to manage collaborators until the SA has been added.
+    manage_client = api if args.project_owner else None
     add_service_account(sa, project_id, args.sa_username, manage_client=manage_client)
-    env_id = ensure_environment(sa, args.env_name, admin)
+    env_id = ensure_environment(sa, args.env_name, api)
     deploy_app(sa, project_id, args.app_name, env_id, args.hw_tier)
 
     print(f"\n=== Deployment complete ===\n")

@@ -49,13 +49,13 @@ An admin must create the service account before the pipeline can run:
 
 > The SA token is a JWT that expires (typically after 30 days). Rotate it in GitHub Secrets before expiry.
 
-### 2. Admin API key (first run only)
+### 2. User API key (first run only)
 
-Creating a compute environment requires `EditEnvironment` permission, which the SA's Practitioner role does not have. You need an admin API key **once** — for the very first pipeline run that creates the environment.
+Creating a compute environment requires `EditEnvironment` permission, which the SA's Practitioner role does not have. You need an user API key **once** — for the very first pipeline run that creates the environment.
 
-After the environment exists, `DOMINO_ADMIN_TOKEN` is no longer needed and can be removed from secrets.
+After the environment exists, `DOMINO_USER_API_KEY` is no longer needed and can be removed from secrets.
 
-Get an admin API key from: **Domino UI → (Admin user) → Account Settings → API Keys**
+Get an user API key from: **Domino UI → (Admin user) → Account Settings → API Keys**
 
 ---
 
@@ -69,7 +69,7 @@ Go to **GitHub repo → Settings → Secrets and variables → Actions → Secre
 |--------|-------|
 | `DOMINO_URL` | Your Domino instance URL, e.g. `https://your-org.cs.domino.tech` |
 | `DOMINO_SA_TOKEN` | Service account Bearer token (JWT) |
-| `DOMINO_ADMIN_TOKEN` | Admin API key *(only needed on first run — remove after environment is created)* |
+| `DOMINO_USER_API_KEY` | User API key *(only needed on first run — remove after environment is created)* |
 
 ### Variables (optional)
 
@@ -99,11 +99,11 @@ Checks whether `functional-sa` is already a Contributor on the project. Adds it 
 ### Step 3 — ensure_environment
 
 Looks for a **Global** compute environment with the given name. If found, returns its ID. If not found:
-- Requires `DOMINO_ADMIN_TOKEN` (exits with a clear error if missing)
+- Requires `DOMINO_USER_API_KEY` (exits with a clear error if missing)
 - Creates the environment based on **Domino Standard Environment (Python 3.10 / R 4.5)**
 - Adds `RUN pip install streamlit>=1.35.0` to the Dockerfile
 
-On all subsequent runs, the environment already exists so `DOMINO_ADMIN_TOKEN` is never needed again.
+On all subsequent runs, the environment already exists so `DOMINO_USER_API_KEY` is never needed again.
 
 ### Step 4 — deploy_app
 
@@ -121,7 +121,7 @@ pip install requests
 
 export DOMINO_URL="https://your-org.cs.domino.tech"
 export DOMINO_SA_TOKEN="<bearer-token>"
-export DOMINO_ADMIN_TOKEN="<admin-api-key>"   # only needed if environment doesn't exist yet
+export DOMINO_USER_API_KEY="<admin-api-key>"   # only needed if environment doesn't exist yet
 export DOMINO_PROJECT_NAME="my-project"
 export DOMINO_ENV_NAME="my-streamlit-env"
 export DOMINO_APP_NAME="my-app"
